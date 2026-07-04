@@ -713,21 +713,49 @@ class Component extends DCLogic {
     let mx = 0, tx = 0, sp = 0, tsp = 0;
     const onMove = (e) => { mx = e.clientX / window.innerWidth - 0.5; };
     window.addEventListener('pointermove', onMove);
-    const onScroll = () => { const m = document.documentElement.scrollHeight - window.innerHeight; tsp = m > 0 ? window.scrollY / m : 0; };
+    let rawVel = 0, lastY = window.scrollY, lastT = performance.now();
+    const onScroll = () => {
+      const m = document.documentElement.scrollHeight - window.innerHeight;
+      tsp = m > 0 ? window.scrollY / m : 0;
+      const now = performance.now(), dtS = Math.max(16, now - lastT);
+      rawVel = Math.min(3.2, Math.abs(window.scrollY - lastY) / dtS * 7);
+      lastY = window.scrollY; lastT = now;
+    };
     window.addEventListener('scroll', onScroll, { passive: true }); onScroll();
     const clock = new THREE.Clock();
     const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // Scroll-driven camera choreography (damped) — Hero / Stack / fly-through Work / Contact
+    const K = [
+      { p: 0.00, cy: 12,  cz: 36,  ly: 3,   lz: -42 },
+      { p: 0.20, cy: 9,   cz: 29,  ly: 2,   lz: -47 },
+      { p: 0.40, cy: 4.5, cz: 13,  ly: 1,   lz: -52 },
+      { p: 0.60, cy: 1.0, cz: -12, ly: 2.6, lz: -46 },
+      { p: 0.75, cy: 0.2, cz: -34, ly: 4,   lz: -58 },
+      { p: 1.00, cy: 8,   cz: 14,  ly: 6.5, lz: -74 }
+    ];
+    const sampleCam = (s) => {
+      let a = K[0], b = K[K.length - 1];
+      for (let i = 0; i < K.length - 1; i++) { if (s >= K[i].p && s <= K[i + 1].p) { a = K[i]; b = K[i + 1]; break; } }
+      let u = (s - a.p) / ((b.p - a.p) || 1); u = u * u * (3 - 2 * u);
+      return { cy: a.cy + (b.cy - a.cy) * u, cz: a.cz + (b.cz - a.cz) * u, ly: a.ly + (b.ly - a.ly) * u, lz: a.lz + (b.lz - a.lz) * u };
+    };
+    const cam = sampleCam(0);
+    let speedMul = 1;
+    let flowAcc = 0;
     const loop = () => {
-      const t = reduce ? 0 : clock.getElapsedTime();
+      const dt = reduce ? 0 : Math.min(0.05, clock.getDelta());
+      const t = reduce ? 0 : clock.elapsedTime;
       sp += (tsp - sp) * 0.06;
-      const flow = t * 4 + sp * 150; // landscape streams toward camera as you scroll — endless topography
-      for (let i = 0; i < posAttr.count; i++) { posAttr.array[i*3+1] = H(base[i*3], base[i*3+2] + flow, t); }
+      speedMul += ((1 + rawVel) - speedMul) * 0.08; rawVel *= 0.94;
+      flowAcc += dt * (3 + sp * 26) * speedMul; // base drift + scroll stream, boosted by scroll velocity
+      for (let i = 0; i < posAttr.count; i++) { posAttr.array[i*3+1] = H(base[i*3], base[i*3+2] + flowAcc, t); }
       posAttr.needsUpdate = true;
       tx += (mx - tx) * 0.04;
-      camera.position.x = tx * 6;
-      camera.position.y = 9.5 - sp * 4.5;
-      camera.position.z = 30;
-      camera.lookAt(tx * 3, 2.2 - sp * 2.4, -55);
+      const tg = sampleCam(sp);
+      if (reduce) { cam.cy = tg.cy; cam.cz = tg.cz; cam.ly = tg.ly; cam.lz = tg.lz; }
+      else { cam.cy += (tg.cy - cam.cy) * 0.08; cam.cz += (tg.cz - cam.cz) * 0.08; cam.ly += (tg.ly - cam.ly) * 0.08; cam.lz += (tg.lz - cam.lz) * 0.08; }
+      camera.position.set(tx * 5, cam.cy, cam.cz);
+      camera.lookAt(tx * 3, cam.ly, cam.lz);
       mat.color.copy(cViolet).lerp(cPink, Math.min(1, sp) * 0.55);
       renderer.render(scene, camera);
       if (!this._shown) { this._shown = true; canvas.style.opacity = '1'; const fb = document.getElementById('violet-fallback'); if (fb) fb.style.opacity = '0'; }
